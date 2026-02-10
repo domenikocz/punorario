@@ -1,10 +1,7 @@
 import streamlit as st
 import pandas as pd
 import datetime
-
-# Aumenta il limite di caricamento (opzionale se eseguito localmente)
-# st.set_page_config deve essere la PRIMA istruzione Streamlit
-st.set_page_config(page_title="GME 15-min Analyzer", layout="wide")
+import os
 
 def get_festivita_italiane(anno):
     festivita = [
@@ -29,11 +26,9 @@ def get_festivita_italiane(anno):
     return festivita
 
 def assegna_fascia(row, festivita):
-    # GME 1-24 -> Python 0-23
     ora = int(row['Ora']) - 1
     data_obj = row['Data_Obj']
     giorno_sett = data_obj.weekday()
-
     if giorno_sett == 6 or data_obj in festivita:
         return 'F3'
     if giorno_sett == 5:
@@ -45,38 +40,44 @@ def assegna_fascia(row, festivita):
     else:
         return 'F3'
 
-st.title("GME 15-min Analyzer (2025-2026)")
+st.set_page_config(page_title="GME Data Reader", layout="wide")
+st.title("Analisi PUN Orario da Repository")
+
+# Configurazione file nel repository
+# Assicurati che i nomi dei file corrispondano a quelli presenti nella cartella
+FILE_2025 = "Anno 2025_12_15.xlsx"
+FILE_2026 = "Anno 2026_12_15.xlsx" # Modifica il nome se differente
 
 with st.sidebar:
-    anno_sel = st.selectbox("Anno", [2025, 2026])
-    mese_sel = st.selectbox("Mese", list(range(1, 13)))
-    st.info("Nota: Per file grandi l'upload potrebbe richiedere qualche secondo.")
+    st.header("Filtri")
+    anno_sel = st.selectbox("Seleziona Anno", [2025, 2026])
+    mese_sel = st.selectbox("Seleziona Mese", list(range(1, 13)))
 
-uploaded_file = st.file_uploader("Carica file Excel GME (15 min)", type=['xlsx'])
+# Selezione automatica del file in base all'anno
+file_path = FILE_2025 if anno_sel == 2025 else FILE_2026
 
-if uploaded_file:
+if os.path.exists(file_path):
     try:
-        # Caricamento ottimizzato: leggiamo solo le colonne necessarie
-        # Il file GME ha spesso molte zone (NORD, SUD, ecc.) che appesantiscono la lettura
-        df = pd.read_excel(uploaded_file)
-        
-        # Pulizia nomi colonne
-        df.columns = [str(c).replace('\n', ' ').strip() for c in df.columns]
+        @st.cache_data
+        def load_data(path):
+            df = pd.read_excel(path)
+            df.columns = [str(c).replace('\n', ' ').strip() for c in df.columns]
+            return df
+
+        df_raw = load_data(file_path)
         
         col_data = "Data/Date (YYYYMMDD)"
         col_ora = "Ora /Hour"
         col_pun = "PUN INDEX GME"
 
-        # Pre-conversione per velocizzare il filtro
-        df['Data_Str'] = df[col_data].astype(str)
-        df['Data_DT'] = pd.to_datetime(df['Data_Str'], format='%Y%m%d')
+        # Trasformazione date
+        df_raw['Data_DT'] = pd.to_datetime(df_raw[col_data].astype(str), format='%Y%m%d')
         
-        # Filtro immediato per ridurre il peso dei dati in memoria
-        mask = (df['Data_DT'].dt.year == anno_sel) & (df['Data_DT'].dt.month == mese_sel)
-        df_mese = df.loc[mask].copy()
+        # Filtro per mese
+        df_mese = df_raw[df_raw['Data_DT'].dt.month == mese_sel].copy()
 
         if df_mese.empty:
-            st.warning(f"Nessun dato trovato per {mese_sel}/{anno_sel}.")
+            st.warning(f"Dati non disponibili per il mese {mese_sel}/{anno_sel}")
         else:
             df_mese['Data_Obj'] = df_mese['Data_DT'].dt.date
             df_mese['Ora'] = df_mese[col_ora]
@@ -84,13 +85,13 @@ if uploaded_file:
             festivita = get_festivita_italiane(anno_sel)
             df_mese['Fascia'] = df_mese.apply(lambda r: assegna_fascia(r, festivita), axis=1)
 
-            # CALCOLO MEDIE MENSILI
+            # Medie Mensili
             f1 = df_mese[df_mese['Fascia'] == 'F1'][col_pun].mean()
             f2 = df_mese[df_mese['Fascia'] == 'F2'][col_pun].mean()
             f3 = df_mese[df_mese['Fascia'] == 'F3'][col_pun].mean()
             f0 = df_mese[col_pun].mean()
 
-            st.subheader(f"Medie Mensili {mese_sel}/{anno_sel}")
+            st.subheader(f"Riepilogo Fasce: {mese_sel}/{anno_sel}")
             res_df = pd.DataFrame({
                 "Fascia": ["F0 (PUN Medio)", "F1", "F2", "F3"],
                 "€/MWh": [f0, f1, f2, f3],
@@ -98,18 +99,15 @@ if uploaded_file:
             })
             st.table(res_df.style.format({'€/MWh': '{:.2f}', '€/kWh': '{:.5f}'}))
 
-            # CALCOLO PUN ORARIO (Media dei 4 quarti d'ora)
-            st.subheader("PUN Orario (Media dei 15 min)")
-            # Raggruppiamo per Data e Ora per avere il valore orario richiesto
+            # PUN Orario
+            st.subheader("Dettaglio PUN Orario (Media 15 min)")
             pun_orario = df_mese.groupby([col_data, 'Ora', 'Fascia'])[col_pun].mean().reset_index()
             pun_orario.columns = ['Data', 'Ora', 'Fascia', 'PUN_Orario_MWh']
             pun_orario['PUN_Orario_kWh'] = pun_orario['PUN_Orario_MWh'] / 1000
             
             st.dataframe(pun_orario, use_container_width=True)
-            
-            # Download dei risultati orari
-            csv = pun_orario.to_csv(index=False).encode('utf-8')
-            st.download_button("Scarica PUN Orario in CSV", csv, f"PUN_Orario_{mese_sel}_{anno_sel}.csv", "text/csv")
 
     except Exception as e:
-        st.error(f"Si è verificato un errore durante l'elaborazione: {e}")
+        st.error(f"Errore durante l'apertura del file: {e}")
+else:
+    st.error(f"File non trovato nel repository: {file_path}")
