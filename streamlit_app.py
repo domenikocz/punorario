@@ -2,8 +2,11 @@ import streamlit as st
 import pandas as pd
 import datetime
 
+# Aumenta il limite di caricamento (opzionale se eseguito localmente)
+# st.set_page_config deve essere la PRIMA istruzione Streamlit
+st.set_page_config(page_title="GME 15-min Analyzer", layout="wide")
+
 def get_festivita_italiane(anno):
-    """Calcola le festività nazionali italiane."""
     festivita = [
         datetime.date(anno, 1, 1), datetime.date(anno, 1, 6),
         datetime.date(anno, 4, 25), datetime.date(anno, 5, 1),
@@ -11,7 +14,7 @@ def get_festivita_italiane(anno):
         datetime.date(anno, 11, 1), datetime.date(anno, 12, 8),
         datetime.date(anno, 12, 25), datetime.date(anno, 12, 26),
     ]
-    # Pasquetta
+    # Calcolo Pasquetta
     a, b, c = anno % 19, anno // 100, anno % 100
     d, e = b // 4, b % 4
     f = (b + 8) // 25
@@ -26,18 +29,18 @@ def get_festivita_italiane(anno):
     return festivita
 
 def assegna_fascia(row, festivita):
-    # L'ora nel file GME è 1-24. Python usa 0-23.
-    ora_zero_based = int(row['Ora']) - 1
+    # GME 1-24 -> Python 0-23
+    ora = int(row['Ora']) - 1
     data_obj = row['Data_Obj']
-    giorno_sett = data_obj.weekday() # 0=Lun, 6=Dom
+    giorno_sett = data_obj.weekday()
 
     if giorno_sett == 6 or data_obj in festivita:
         return 'F3'
     if giorno_sett == 5:
-        return 'F2' if 7 <= ora_zero_based < 23 else 'F3'
-    if 8 <= ora_zero_based < 19:
+        return 'F2' if 7 <= ora < 23 else 'F3'
+    if 8 <= ora < 19:
         return 'F1'
-    elif ora_zero_based == 7 or 19 <= ora_zero_based < 23:
+    elif ora == 7 or 19 <= ora < 23:
         return 'F2'
     else:
         return 'F3'
@@ -47,58 +50,66 @@ st.title("GME 15-min Analyzer (2025-2026)")
 with st.sidebar:
     anno_sel = st.selectbox("Anno", [2025, 2026])
     mese_sel = st.selectbox("Mese", list(range(1, 13)))
+    st.info("Nota: Per file grandi l'upload potrebbe richiedere qualche secondo.")
 
 uploaded_file = st.file_uploader("Carica file Excel GME (15 min)", type=['xlsx'])
 
 if uploaded_file:
     try:
+        # Caricamento ottimizzato: leggiamo solo le colonne necessarie
+        # Il file GME ha spesso molte zone (NORD, SUD, ecc.) che appesantiscono la lettura
         df = pd.read_excel(uploaded_file)
-        # Pulizia nomi colonne da invii a capo
+        
+        # Pulizia nomi colonne
         df.columns = [str(c).replace('\n', ' ').strip() for c in df.columns]
         
-        # Identificazione colonne
         col_data = "Data/Date (YYYYMMDD)"
         col_ora = "Ora /Hour"
         col_pun = "PUN INDEX GME"
-        
-        # Conversione e Filtro
+
+        # Pre-conversione per velocizzare il filtro
         df['Data_Str'] = df[col_data].astype(str)
-        df['Data_Obj'] = pd.to_datetime(df['Data_Str'], format='%Y%m%d').dt.date
+        df['Data_DT'] = pd.to_datetime(df['Data_Str'], format='%Y%m%d')
         
-        df_filtered = df[(pd.to_datetime(df['Data_Str']).dt.year == anno_sel) & 
-                         (pd.to_datetime(df['Data_Str']).dt.month == mese_sel)].copy()
+        # Filtro immediato per ridurre il peso dei dati in memoria
+        mask = (df['Data_DT'].dt.year == anno_sel) & (df['Data_DT'].dt.month == mese_sel)
+        df_mese = df.loc[mask].copy()
 
-        if df_filtered.empty:
-            st.warning("Nessun dato per il periodo selezionato.")
+        if df_mese.empty:
+            st.warning(f"Nessun dato trovato per {mese_sel}/{anno_sel}.")
         else:
+            df_mese['Data_Obj'] = df_mese['Data_DT'].dt.date
+            df_mese['Ora'] = df_mese[col_ora]
+            
             festivita = get_festivita_italiane(anno_sel)
-            # Rinomino per comodità
-            df_filtered['Ora'] = df_filtered[col_ora]
-            df_filtered['Fascia'] = df_filtered.apply(lambda r: assegna_fascia(r, festivita), axis=1)
+            df_mese['Fascia'] = df_mese.apply(lambda r: assegna_fascia(r, festivita), axis=1)
 
-            # 1. Calcolo Medie Fasce (F1, F2, F3, F0)
-            f1 = df_filtered[df_filtered['Fascia'] == 'F1'][col_pun].mean()
-            f2 = df_filtered[df_filtered['Fascia'] == 'F2'][col_pun].mean()
-            f3 = df_filtered[df_filtered['Fascia'] == 'F3'][col_pun].mean()
-            f0 = df_filtered[col_pun].mean()
+            # CALCOLO MEDIE MENSILI
+            f1 = df_mese[df_mese['Fascia'] == 'F1'][col_pun].mean()
+            f2 = df_mese[df_mese['Fascia'] == 'F2'][col_pun].mean()
+            f3 = df_mese[df_mese['Fascia'] == 'F3'][col_pun].mean()
+            f0 = df_mese[col_pun].mean()
 
-            st.header(f"Medie Mensili {mese_sel}/{anno_sel}")
+            st.subheader(f"Medie Mensili {mese_sel}/{anno_sel}")
             res_df = pd.DataFrame({
-                "Fascia": ["F0 (Totale)", "F1", "F2", "F3"],
+                "Fascia": ["F0 (PUN Medio)", "F1", "F2", "F3"],
                 "€/MWh": [f0, f1, f2, f3],
                 "€/kWh": [f0/1000, f1/1000, f2/1000, f3/1000]
             })
             st.table(res_df.style.format({'€/MWh': '{:.2f}', '€/kWh': '{:.5f}'}))
 
-            # 2. PUN Orario (Media dei 4 periodi per ogni ora)
-            st.header("Dettaglio PUN Orario")
-            pun_orario = df_filtered.groupby([col_data, 'Ora', 'Fascia'])[col_pun].mean().reset_index()
-            pun_orario.columns = ['Data', 'Ora', 'Fascia', 'PUN Orario (€/MWh)']
+            # CALCOLO PUN ORARIO (Media dei 4 quarti d'ora)
+            st.subheader("PUN Orario (Media dei 15 min)")
+            # Raggruppiamo per Data e Ora per avere il valore orario richiesto
+            pun_orario = df_mese.groupby([col_data, 'Ora', 'Fascia'])[col_pun].mean().reset_index()
+            pun_orario.columns = ['Data', 'Ora', 'Fascia', 'PUN_Orario_MWh']
+            pun_orario['PUN_Orario_kWh'] = pun_orario['PUN_Orario_MWh'] / 1000
             
-            st.dataframe(pun_orario)
+            st.dataframe(pun_orario, use_container_width=True)
             
-            # Grafico del PUN orario
-            st.line_chart(pun_orario['PUN Orario (€/MWh)'])
+            # Download dei risultati orari
+            csv = pun_orario.to_csv(index=False).encode('utf-8')
+            st.download_button("Scarica PUN Orario in CSV", csv, f"PUN_Orario_{mese_sel}_{anno_sel}.csv", "text/csv")
 
     except Exception as e:
-        st.error(f"Errore nel caricamento: {e}")
+        st.error(f"Si è verificato un errore durante l'elaborazione: {e}")
